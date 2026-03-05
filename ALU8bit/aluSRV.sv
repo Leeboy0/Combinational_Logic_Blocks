@@ -1,86 +1,137 @@
 module aluSRV;
     parameter Width = 8;
 
-    logic[Width - 1:0] a, b;
-    logic[2:0]      alu_op;
-    logic[Width - 1:0] result;
-    logic           zero, carry_out,overflow,negative;
+    logic [Width-1:0] a, b;
+    logic [2:0]       alu_op;
+    logic [Width-1:0] result;
+    logic             zero, carry_out, overflow, negative;
 
-    class alu_transcation;
-        rand logic[Width - 1:0] a,b;
-        rand logic [2:0]    alu_op;
+    // ===== SCOREBOARD FUNCTION =====
+    // Returns 1 if pass, 0 if fail
+    function automatic logic scoreboard(
+        input logic [Width-1:0] in_a, in_b,
+        input logic [2:0]       op,
+        input logic [Width-1:0] actual_result,
+        input logic             actual_zero,
+        input logic             actual_carry,
+        input logic             actual_overflow,
+        input logic             actual_negative
+    );
+        // Reference model — compute expected values
+        logic [Width:0]   exp_full;
+        logic [Width-1:0] exp_result;
+        logic             exp_zero, exp_carry, exp_overflow, exp_negative;
+        logic             pass;
 
-        // Constraint 1: bias a and b toward edge cases
-        constraint edge_bias{
-            a dist {
-                8'h00 := 15, // 15% chance of zero
-                8'hFF := 15, // 15% chance of max
-                8'h7F := 10, // 10% chance of +127 (signed max)
-                8'h80 := 10, // 10% chance of -128 (signed min)
-                [8'h01:8'hFE] := 50 // 50% fully random
-            };
-            b dist {
-                8'h00 := 15,
-                8'hFF := 15,
-                8'h7F := 10,
-                8'h80 := 10,
-                [8'h01:8'hFE] := 50
-            };
-        }
+        case (op)
+            3'b000: exp_full = {1'b0, in_a} + {1'b0, in_b};
+            3'b001: exp_full = {1'b0, in_a} - {1'b0, in_b};
+            3'b010: exp_full = {1'b0, in_a  & in_b};
+            3'b011: exp_full = {1'b0, in_a  | in_b};
+            3'b100: exp_full = {1'b0, in_a  ^ in_b};
+            3'b101: exp_full = {1'b0, ~in_a};
+            3'b110: exp_full = {1'b0, in_a  << 1};
+            3'b111: exp_full = {1'b0, in_a  >> 1};
+            default: exp_full = '0;
+        endcase
 
-            // Constraint 2: all opcodes equally likely
-            constraint op_dist {
-                alu_op dist{
-                    3'b000 := 1,
-                    3'b001 := 1,
-                    3'b010 := 1,
-                    3'b011 := 1,
-                    3'b100 := 1,
-                    3'b101 := 1,
-                    3'b110 := 1,
-                    3'b111 := 1
-                };
-           }
-        
-        
-    endclass //className
+        exp_result   = exp_full[Width-1:0];
+        exp_carry    = exp_full[Width];
+        exp_zero     = (exp_result == '0);
+        exp_negative = exp_result[Width-1];
+        exp_overflow = (op == 3'b000) ?
+            (~in_a[Width-1] & ~in_b[Width-1] &  exp_result[Width-1]) |
+            ( in_a[Width-1] &  in_b[Width-1] & ~exp_result[Width-1])
+          : (op == 3'b001) ?
+            (~in_a[Width-1] &  in_b[Width-1] &  exp_result[Width-1]) |
+            ( in_a[Width-1] & ~in_b[Width-1] & ~exp_result[Width-1])
+          : 1'b0;
 
-    alu#(.Width(Width)) dut(
-         .a(a),
-        .b(b),
-        .alu_op(alu_op),
-        .result(result),
-        .zero(zero),
-        .carry_out(carry_out),
-        .overflow(overflow),
+        // Compare each output
+        pass = 1;
+
+        if (actual_result !== exp_result) begin
+            $error("RESULT MISMATCH | op=%03b a=%08b b=%08b | got=%08b expected=%08b",
+                    op, in_a, in_b, actual_result, exp_result);
+            pass = 0;
+        end
+        if (actual_zero !== exp_zero) begin
+            $error("ZERO FLAG MISMATCH | op=%03b a=%08b b=%08b | got=%b expected=%b",
+                    op, in_a, in_b, actual_zero, exp_zero);
+            pass = 0;
+        end
+        if (actual_carry !== exp_carry) begin
+            $error("CARRY MISMATCH | op=%03b a=%08b b=%08b | got=%b expected=%b",
+                    op, in_a, in_b, actual_carry, exp_carry);
+            pass = 0;
+        end
+        if (actual_overflow !== exp_overflow) begin
+            $error("OVERFLOW MISMATCH | op=%03b a=%08b b=%08b | got=%b expected=%b",
+                    op, in_a, in_b, actual_overflow, exp_overflow);
+            pass = 0;
+        end
+        if (actual_negative !== exp_negative) begin
+            $error("NEGATIVE MISMATCH | op=%03b a=%08b b=%08b | got=%b expected=%b",
+                    op, in_a, in_b, actual_negative, exp_negative);
+            pass = 0;
+        end
+
+        return pass;
+    endfunction
+    // ===== END SCOREBOARD =====
+
+    alu #(.WIDTH(Width)) dut (
+        .a(a), .b(b), .alu_op(alu_op),
+        .result(result), .zero(zero),
+        .carry_out(carry_out), .overflow(overflow),
         .negative(negative)
     );
 
-	alu_transcation txn;	
+    // Counters to track pass/fail
+    int pass_count = 0;
+    int fail_count = 0;
+
+    // Weighted random operand function
+    function automatic logic [7:0] rand_operand();
+        logic [6:0] roll;
+        roll = $urandom_range(0, 99);
+        if      (roll < 15) return 8'h00;
+        else if (roll < 30) return 8'hFF;
+        else if (roll < 40) return 8'h7F;
+        else if (roll < 50) return 8'h80;
+        else                return $urandom_range(1, 254);
+    endfunction
 
     initial begin
         $dumpfile("aluSRV.vcd");
         $dumpvars(0, aluSRV);
 
-        
+        $display("=== CRV Stage 2: Random Stimulus + Scoreboard ===");
 
-        $display("=== CRV Stage 1: Random Stimulus ===");
-	txn = new();
         repeat(200) begin
-            assert (txn.randomize()) 
-            else   $fatal("Ramdomization failed!");
-
-            //Driver inputs
-            a = txn.a;
-            b = txn.b;
-            alu_op = txn.alu_op;
+            a      = rand_operand();
+            b      = rand_operand();
+            alu_op = $urandom_range(0, 7);
             #10;
 
-            $display("op=%03b a=%08b b=%08b | result=%08b zero=%b carry=%b overflow=%b negative=%b",
-                      alu_op, a, b, result, zero, carry_out, overflow, negative);
+            // Call scoreboard — it checks everything automatically
+            if (scoreboard(a, b, alu_op,
+                           result, zero, carry_out, overflow, negative))
+                pass_count++;
+            else
+                fail_count++;
         end
 
-        $display("=== Done ===");
+        // Final summary
+        $display("=== Scoreboard Summary ===");
+        $display("PASS: %0d / 200", pass_count);
+        $display("FAIL: %0d / 200", fail_count);
+
+        if (fail_count == 0)
+            $display("ALL TESTS PASSED ✓");
+        else
+            $display("FAILURES DETECTED — check $error messages above");
+
         $finish;
     end
 
